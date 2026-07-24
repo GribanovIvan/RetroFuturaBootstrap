@@ -442,7 +442,7 @@ public class LaunchClassLoader extends URLClassLoaderWithUtilities implements Ex
                 }
                 basicClass = newKlass;
             } catch (UnsupportedOperationException e) {
-                if (e.getMessage().contains("requires ASM")) {
+                if (e.getMessage() != null && e.getMessage().contains("requires ASM")) {
                     LogWrapper.rfb$logger.warn(
                             "ASM transformer {} encountered a newer classfile ({} -> {}) than supported: {}",
                             xformer.getClass().getName(),
