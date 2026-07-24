@@ -31,6 +31,9 @@ public class SharedConfig {
     /** Controlled by system property {@code rfb.dumpClassesAsynchronously=true}, if the class dumps are done from another Thread to avoid slow IO */
     public static final boolean cfgDumpClassesAsynchronously = getBooleanOr("rfb.dumpClassesAsynchronously", true);
 
+    /** Controlled by system property {@code rfb.computeMinecraftFrames=true}, whether stack map frames of net.minecraft.* classes are recomputed after transformers modify them */
+    public static final boolean cfgComputeMinecraftFrames = getBooleanOr("rfb.computeMinecraftFrames", true);
+
     /** The target class dumping directory, initialized during commandline option parsing. */
     public static @NotNull AtomicReference<@Nullable Path> classDumpDirectory = new AtomicReference<>(null);
 

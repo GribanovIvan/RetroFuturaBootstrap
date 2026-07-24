@@ -30,6 +30,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.jar.Manifest;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
 
 public class LaunchClassLoader extends URLClassLoaderWithUtilities implements ExtensibleClassLoader {
@@ -288,6 +289,7 @@ public class LaunchClassLoader extends URLClassLoaderWithUtilities implements Ex
         if (Main.cfgDumpLoadedClassesPerTransformer && classBytes != null) {
             Main.dumpClass(this.getClassLoaderName(), transformedName + "__000_pretransform", classBytes);
         }
+        final byte[] rfb$preTransformBytes = classBytes;
         if (runTransformers) {
             try {
                 classBytes = runTransformers(untransformedName, transformedName, classBytes);
@@ -325,6 +327,17 @@ public class LaunchClassLoader extends URLClassLoaderWithUtilities implements Ex
             invalidClasses.add(name);
             throw new ClassNotFoundException(String.format("Class bytes are null for %s (%s, %s)", name, name, name));
         }
+        // A transformer that rewrote a net.minecraft method with COMPUTE_MAXS only, or with a getCommonSuperClass that
+        // couldn't resolve the obfuscated hierarchy, leaves frames the verifier rejects later. Nothing throws at
+        // transform
+        // time, so the retry in runTransformers never sees it; recompute the frames here instead. The deobfuscation
+        // transformer rewrites every Minecraft class, so in practice this covers nearly all of them.
+        if (Main.cfgComputeMinecraftFrames
+                && runTransformers
+                && classBytes != rfb$preTransformBytes
+                && transformedName.startsWith("net.minecraft.")) {
+            classBytes = rfb$recomputeFrames(transformedName, classBytes);
+        }
         if (Main.cfgDumpLoadedClasses) {
             Main.dumpClass(this.getClassLoaderName(), transformedName, classBytes);
         }
@@ -334,6 +347,25 @@ public class LaunchClassLoader extends URLClassLoaderWithUtilities implements Ex
         Class<?> result = defineClass(transformedName, classBytes, 0, classBytes.length, codeSource);
         cachedClasses.put(transformedName, result);
         return result;
+    }
+
+    /**
+     * Force ASM to recompute this class's stack map frames with a deobf-aware, non-classloading writer
+     * (SafeAsmClassWriter resolves getCommonSuperClass through this loader). The writer is built without the reader on
+     * purpose: {@code new ClassWriter(reader, flags)} copies unchanged methods (and their stale frames) verbatim and
+     * skips the recompute. Returns the original bytes if anything goes wrong, so this can never turn a loadable class
+     * unloadable.
+     */
+    private byte[] rfb$recomputeFrames(final String transformedName, final byte[] classBytes) {
+        try {
+            final SafeAsmClassWriter writer = new SafeAsmClassWriter(ClassWriter.COMPUTE_FRAMES);
+            new ClassReader(classBytes).accept(writer, ClassReader.SKIP_FRAMES);
+            return writer.toByteArray();
+        } catch (Throwable t) {
+            LogWrapper.rfb$logger.debug(
+                    "Could not recompute frames for {}, keeping original bytes", transformedName, t);
+            return classBytes;
+        }
     }
 
     // based off OpenJDK's own URLClassLoader
@@ -529,10 +561,96 @@ public class LaunchClassLoader extends URLClassLoaderWithUtilities implements Ex
     public @Nullable FastClassAccessor findClassMetadata(@NotNull String name) {
         FastClassAccessor acc = findClassMetadataImpl(name);
         if (acc == null && renameTransformer != null) {
-            name = untransformName(name);
-            acc = findClassMetadataImpl(name);
+            // Not found under the live (deobfuscated) name, so fetch it under its in-jar (obfuscated) name. The
+            // on-disk header then carries obfuscated super/interface names; wrap it so callers (notably
+            // SafeAsmClassWriter#getCommonSuperClass) see the live names the transformed class actually references.
+            // Without this, frames computed for a net.minecraft.* class point at obfuscated supertypes and fail to
+            // verify once the class is defined under its live name.
+            final FastClassAccessor obfAcc = findClassMetadataImpl(untransformName(name));
+            acc = (obfAcc == null) ? null : new RemappedClassAccessor(obfAcc);
         }
         return acc;
+    }
+
+    /**
+     * Wraps a FastClassAccessor read from an in-jar (obfuscated) class file so its class names are presented in the
+     * live (deobfuscated) namespace via the active renameTransformer. remapClassName is an identity for names the
+     * transformer doesn't know (e.g. non-minecraft classes), so this is a no-op there.
+     */
+    private final class RemappedClassAccessor implements FastClassAccessor {
+        private final FastClassAccessor delegate;
+
+        RemappedClassAccessor(FastClassAccessor delegate) {
+            this.delegate = delegate;
+        }
+
+        private String toLive(String binaryName) {
+            if (binaryName == null || renameTransformer == null) {
+                return binaryName;
+            }
+            final String live = renameTransformer.remapClassName(binaryName.replace('/', '.'));
+            return live == null ? binaryName : live.replace('.', '/');
+        }
+
+        @Override
+        public @NotNull String binaryThisName() {
+            return toLive(delegate.binaryThisName());
+        }
+
+        @Override
+        public @Nullable String binarySuperName() {
+            return toLive(delegate.binarySuperName());
+        }
+
+        @Override
+        public @NotNull List<@NotNull String> binaryInterfaceNames() {
+            final List<@NotNull String> src = delegate.binaryInterfaceNames();
+            final List<@NotNull String> out = new ArrayList<>(src.size());
+            for (final String iface : src) {
+                out.add(toLive(iface));
+            }
+            return Collections.unmodifiableList(out);
+        }
+
+        @Override
+        public boolean isPublic() {
+            return delegate.isPublic();
+        }
+
+        @Override
+        public boolean isFinal() {
+            return delegate.isFinal();
+        }
+
+        @Override
+        public boolean isInterface() {
+            return delegate.isInterface();
+        }
+
+        @Override
+        public boolean isAbstract() {
+            return delegate.isAbstract();
+        }
+
+        @Override
+        public boolean isSynthetic() {
+            return delegate.isSynthetic();
+        }
+
+        @Override
+        public boolean isAnnotation() {
+            return delegate.isAnnotation();
+        }
+
+        @Override
+        public boolean isEnum() {
+            return delegate.isEnum();
+        }
+
+        @Override
+        public boolean isModule() {
+            return delegate.isModule();
+        }
     }
 
     public @Nullable FastClassAccessor findClassMetadataImpl(@NotNull String name) {
