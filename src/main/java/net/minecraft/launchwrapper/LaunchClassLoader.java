@@ -412,11 +412,19 @@ public class LaunchClassLoader extends URLClassLoaderWithUtilities implements Ex
                     if (e.getStackTrace() != null
                             && e.getStackTrace().length > 2
                             && e.getStackTrace()[0].getClassName().contains("asm.MethodWriter")) {
-                        SafeAsmClassWriter.forcedFlags.set(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-                        SafeAsmClassWriter.forcedOriginalClass.set(basicClass);
-                        newKlass = xformer.transform(name, transformedName, basicClass);
-                        SafeAsmClassWriter.forcedOriginalClass.set(null);
-                        SafeAsmClassWriter.forcedFlags.set(0);
+                        // Restore the previous forced state in a finally: if the retry throws, the state must not
+                        // leak onto the thread, and if this retry is nested inside another class's retry (a
+                        // transformer loading a class mid-transform), the outer retry must keep its own state.
+                        final int previousFlags = SafeAsmClassWriter.forcedFlags.get();
+                        final byte[] previousOriginalClass = SafeAsmClassWriter.forcedOriginalClass.get();
+                        try {
+                            SafeAsmClassWriter.forcedFlags.set(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+                            SafeAsmClassWriter.forcedOriginalClass.set(basicClass);
+                            newKlass = xformer.transform(name, transformedName, basicClass);
+                        } finally {
+                            SafeAsmClassWriter.forcedOriginalClass.set(previousOriginalClass);
+                            SafeAsmClassWriter.forcedFlags.set(previousFlags);
+                        }
                         LogWrapper.rfb$logger.warn(
                                 "Transformer {} did not generate correct frames for {}, had to re-compute using asm.",
                                 xformer.getClass().getName(),
