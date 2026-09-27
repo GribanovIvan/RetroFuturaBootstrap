@@ -294,6 +294,10 @@ public class LaunchClassLoader extends URLClassLoaderWithUtilities implements Ex
             } catch (Throwable t) {
                 ClassNotFoundException err =
                         new ClassNotFoundException("Exception caught while transforming class " + name, t);
+                // Cache the failure like LaunchWrapper did, so repeated lookups of this name (e.g. a mod probing
+                // for an optional class every frame) fail fast instead of re-running every transformer and
+                // logging a full stack trace each time.
+                invalidClasses.add(name);
                 LogWrapper.rfb$logger.debug("Transformer error", err);
                 throw err;
             }
@@ -316,6 +320,7 @@ public class LaunchClassLoader extends URLClassLoaderWithUtilities implements Ex
                 } catch (Throwable t) {
                     ClassNotFoundException err =
                             new ClassNotFoundException("Exception caught while transforming class " + name, t);
+                    invalidClasses.add(name);
                     LogWrapper.rfb$logger.debug("Transformer error", err);
                     throw err;
                 }
